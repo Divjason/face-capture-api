@@ -108,11 +108,11 @@ async def create_capture(
     gender: str = Form(...),
     age: int = Form(...),            # 10/20/30/40/50/60/70/80
     session_id: str = Form(None),
-    consent: int = Form(1)
+    consent: int = Form(1),
 ):
     if gender not in ("male", "female"):
         raise HTTPException(422, "Invalid gender")
-    if age not in (10,20,30,40,50,60,70,80):
+    if age not in (10, 20, 30, 40, 50, 60, 70, 80):
         raise HTTPException(422, "Invalid age bucket")
 
     data = await image.read()
@@ -120,29 +120,45 @@ async def create_capture(
         raise HTTPException(400, "Empty file")
 
     content_type = image.content_type or "image/jpeg"
-    ext = ".jpg" if content_type == "image/jpeg" else ".png"
+    # 간단 확장자 매핑
+    ext = ".jpg"
+    if content_type in ("image/png", "image/x-png"):
+        ext = ".png"
+
     filename = f"{uuid.uuid4()}{ext}"
 
-    # 1) Supabase Storage 업로드 (버킷은 public 권장)
+    # 1) Supabase Storage 업로드
+    #   - supabase-py v2는 UploadResponse 객체를 반환합니다.
     up = supabase.storage.from_(SUPABASE_BUCKET).upload(
         path=filename,
         file=data,
         file_options={"content-type": content_type, "upsert": False},
     )
-    if not up or up.get("path") is None:
-        raise HTTPException(500, "Storage upload failed")
 
-    # 2) 공개 URL 생성
+    # UploadResponse 객체/딕셔너리 모두 안전하게 처리
+    uploaded_path = getattr(up, "path", None)
+    if not uploaded_path and isinstance(up, dict):
+        uploaded_path = up.get("path")
+
+    if not uploaded_path:
+        # 어떤 값이 왔는지 로깅용으로 포함
+        raise HTTPException(500, f"Storage upload failed: {up}")
+
+    # 2) 공개 URL 생성 (버킷이 Public일 때)
+    # 버킷이 Private이면 generate_signed_url 사용 필요
     image_url = supabase.storage.from_(SUPABASE_BUCKET).get_public_url(filename)
 
     # 3) DB insert
     with pool.connection() as conn:
         with conn.cursor() as cur:
-            cur.execute("""
+            cur.execute(
+                """
                 INSERT INTO captures (image_url, gender, age_bucket, consent, session_id)
-                VALUES (%s,%s,%s,%s,%s)
+                VALUES (%s, %s, %s, %s, %s)
                 RETURNING id
-            """, (image_url, gender, age, bool(consent), session_id))
+                """,
+                (image_url, gender, age, bool(consent), session_id),
+            )
             new_id = cur.fetchone()[0]
             conn.commit()
 
